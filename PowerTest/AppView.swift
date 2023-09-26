@@ -109,8 +109,9 @@ struct ContentView: View {
                 if Task.isCancelled { break }
                 
                 benchmark_sample_threads(Int32(n_threads), &thread_samples)
-                var sample = thread_samples[0]
-                sample.low_power = ProcessInfo.processInfo.isLowPowerModeEnabled
+                for i in 0..<thread_samples.count {
+                  thread_samples[i].low_power = ProcessInfo.processInfo.isLowPowerModeEnabled
+                }
                 
                 samples.append(thread_samples)
                 progress += step;
