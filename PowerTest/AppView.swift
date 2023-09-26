@@ -12,16 +12,25 @@ func copyToClipboard(text: String) {
 }
 
 
+enum TestKind: CaseIterable, Identifiable {
+  case single, multi
+  var id: Self { self }
+}
+
 struct ContentView: View {
-  @State var samples : Array<benchmark_sample_t> = [];
-  @State var msg = "the app will be unresponsive for several seconds while the tests are running"
+  @State var samples : Array<Array<benchmark_sample_t>> = [];
+  @State var msg = ""
+  @State var task : Task<Void, Never>? = .none
+  @State var progress = 0.0
+  @State var testKind: TestKind = .single
   
   var body: some View {
     VStack(alignment: .leading, spacing: 12.0) {
         List {
           Section(header: HStack {
-            ForEach(["P core", "E core", "Power", "Time", "Primes/sec"], id: \.self) { Text($0) }
+            ForEach(["P core", "E core", "Power", "Work/sec"], id: \.self) { Text($0) }
               .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
+              .font(.footnote)
             
             // results copy button
             Button(action: {
@@ -31,20 +40,44 @@ struct ContentView: View {
             })
             .disabled(samples.count == 0)
           }) {
-            ForEach(0..<samples.count, id: \.self) {
-              let sample = samples[$0]
-              let time   = sample.p_core_counters.time + sample.e_core_counters.time
+            ForEach(0 ..< samples.count, id: \.self) {
+              let thread_samples = samples[$0]
+              
+              // P core frequency (we pick the maximal one among the threads)
+              let p_freq = thread_samples
+                .map({ $0.p_core_counters.cycles/($0.p_core_counters.time)/1e9})
+                .reduce(0, max)
+              
+              // E core frequency (we pick the maximal one among the threads)
+              let e_freq = thread_samples
+                .map({ $0.e_core_counters.cycles/($0.e_core_counters.time)/1e9})
+                .reduce(0, max)
+
+              // total items processed
+              let items = thread_samples.map( { Double($0.items) } ).reduce(0, +)
+
+              // total time elapsed (across all threads)
+              let time = thread_samples.map( { $0.p_core_counters.time + $0.e_core_counters.time } ).reduce(0, +)
+
+              // combined power use
+              let power = thread_samples
+                .map( {
+                  ($0.p_core_counters.energy + $0.e_core_counters.energy) /
+                  ($0.p_core_counters.time + $0.e_core_counters.time + .ulpOfOne)
+                })
+                .reduce(0, +)
+              
               
               HStack {
                 Group {
-                  Text(String(format: "%.3f Ghz", sample.p_core_counters.cycles/time/1e9))
-                  Text(String(format: "%.3f Ghz", sample.e_core_counters.cycles/time/1e9))
-                  Text(String(format: "%.3f W", (sample.p_core_counters.energy + sample.e_core_counters.energy)/time))
-                  Text(String(format: "%.3f sec", time))
-                  Text(String(format: "%.2f sec", Double(sample.primes)/time))
+                  Text(String(format: "%.2f Ghz", p_freq))
+                  Text(String(format: "%.2f Ghz", e_freq))
+                  Text(String(format: "%.2f W", power))
+                  Text(String(format: "%.2f", items/time))
                 }
                 .lineLimit(1)
                 .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
+                .font(.footnote)
               }
             }
           }
@@ -52,22 +85,58 @@ struct ContentView: View {
         
         HStack {
           Button(action: {
-            samples = []
-            
-            for _ in 0..<50 {
-              var sample = run_benchmark()
-              sample.low_power = ProcessInfo.processInfo.isLowPowerModeEnabled
-              
-              samples.append(sample)
+            guard task == .none else {
+              task!.cancel()
+              task = .none
+              return
             }
             
-            copyToClipboard(text: samples.toCSV())
-            msg = "Done, results have been copied to the clipboard"
+            samples = []
+            progress = 0
+            msg = ""
+            
+            let n_steps = 50
+            let step  = 1.0/Double(n_steps + 1)
+            let n_threads = testKind == .single ? 1 : ProcessInfo.processInfo.activeProcessorCount
+            
+            task = Task.detached(priority: .userInitiated) {
+              benchmark_start_threads(Int32(n_threads));
+              
+              var thread_samples = Array(repeating: benchmark_sample_t(), count: n_threads)
+            
+              for _ in 0 ..< n_steps {
+                try? await Task.sleep(for: .milliseconds(1000))
+                if Task.isCancelled { break }
+                
+                benchmark_sample_threads(Int32(n_threads), &thread_samples)
+                var sample = thread_samples[0]
+                sample.low_power = ProcessInfo.processInfo.isLowPowerModeEnabled
+                
+                samples.append(thread_samples)
+                progress += step;
+              }
+              
+              benchmark_teardown_threads()
+              task = .none
+              copyToClipboard(text: samples.toCSV())
+              msg = "Results have been copied to the clipboard!"
+            }
           }, label: {
-            Text("Run tests")
+            Text(task == .none ? "Run test" : "Cancel test")
           })
           
-          Text(msg).font(.subheadline)
+          Picker("", selection: $testKind) {
+            Text("Single-core").tag(TestKind.single)
+            Text("Multi-core (\(ProcessInfo.processInfo.activeProcessorCount) threads)").tag(TestKind.multi)
+          }
+          .frame(width: 200)
+          .disabled(task != .none)
+          
+          
+
+          Text(msg).font(.caption)
+          if(task != .none) { ProgressView(value: progress).controlSize(.small) }
+          
         }
       }
       .padding()

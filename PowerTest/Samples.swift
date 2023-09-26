@@ -33,19 +33,23 @@ func getModelIdentifier() -> String {
 #endif
 
 
-extension Array<benchmark_sample_t> {
+extension Array<Array<benchmark_sample_t>> {
   func toCSV(withModelIdentifier model: String = getModelIdentifier()) -> String {
-    var out = "model, mode, p_cycles, p_time, p_energy, e_cycles, e_time, e_energy, primes\n"
-    for sample in self {
-      out += "\"\(model)\","
-      out += (sample.low_power ? "low" : "high") + ", "
-      out += String(sample.p_core_counters.cycles) + ", "
-      out += String(sample.p_core_counters.time) + ", "
-      out += String(sample.p_core_counters.energy) + ", "
-      out += String(sample.e_core_counters.cycles) + ", "
-      out += String(sample.e_core_counters.time) + ", "
-      out += String(sample.e_core_counters.energy) + ", "
-      out += String(sample.primes) + "\n"
+    var out = "sample, thread_id, device, powermode, p_cycles, p_time, p_energy, e_cycles, e_time, e_energy, items\n"
+    for (sample_idx, thread_samples) in self.enumerated() {
+      for (thread_id, sample) in thread_samples.enumerated() {
+        out += String(sample_idx) + ","
+        out += String(thread_id) + ","
+        out += "\"\(model)\","
+        out += (sample.low_power ? "low" : "high") + ","
+        out += String(sample.p_core_counters.cycles) + ","
+        out += String(sample.p_core_counters.time) + ","
+        out += String(sample.p_core_counters.energy) + ","
+        out += String(sample.e_core_counters.cycles) + ","
+        out += String(sample.e_core_counters.time) + ","
+        out += String(sample.e_core_counters.energy) + ","
+        out += String(sample.items) + "\n"
+      }
     }
     return out
   }

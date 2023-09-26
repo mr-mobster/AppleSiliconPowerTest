@@ -14,16 +14,23 @@ typedef struct {
 } cpu_counters_t;
 
 typedef struct {
+  // thread id
+  int thread_id;
   // CPU counters for P and E core use
   cpu_counters_t p_core_counters;
   cpu_counters_t e_core_counters;
-  // number of detected primes
-  uint64_t primes;
+  // number of processed items
+  uint64_t items;
   // is low power mode enabled
   bool low_power;
 } benchmark_sample_t;
 
 
 benchmark_sample_t run_benchmark(void);
+
+
+void benchmark_sample_threads(int n_threads, benchmark_sample_t samples[n_threads]);
+void benchmark_teardown_threads(void);
+void benchmark_start_threads(int n_threads);
 
 #endif /* benchmark_h */
