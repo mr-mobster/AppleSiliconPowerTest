@@ -37,8 +37,8 @@ extension Array<benchmark_sample_t> {
   func toCSV(withModelIdentifier model: String = getModelIdentifier()) -> String {
     var out = "model, mode, p_cycles, p_time, p_energy, e_cycles, e_time, e_energy, primes\n"
     for sample in self {
-      out += String(model) + ", "
-      out += sample.low_power ? "low" : "high" + ", "
+      out += "\"\(model)\","
+      out += (sample.low_power ? "low" : "high") + ", "
       out += String(sample.p_core_counters.cycles) + ", "
       out += String(sample.p_core_counters.time) + ", "
       out += String(sample.p_core_counters.energy) + ", "
