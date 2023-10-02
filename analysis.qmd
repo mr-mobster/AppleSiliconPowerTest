@@ -1,25 +1,322 @@
 ---
-title: "Power curve analysis"
+title: "Apple Silicon power and frequency analysis"
 format: 
  html:
     toc: true
     embed-resources: true
+    df-print: paged
 ---
 
-# Overview
+## Data overview
 
 ```{r}
 #| echo: false
+#| include: false
 library(tidyverse)
+library(colorspace)
 
-imap(list.files("results", "\\.csv$", full.names = TRUE), ~ {
-  tbl <- read_csv(..1,  show_col_types = FALSE)
-  
+# load the data
+data <- imap(list.files("results", "\\.csv$", full.names = TRUE), ~ {
   tibble(
-    .sample = ..2,
-    .iteration = seq_len(nrow(tbl)),
-    tbl
+    .source = ..2,
+    read_csv(..1,  show_col_types = FALSE)
   )
-}) %>% bind_rows()
+}) %>% 
+bind_rows() %>%
+# single- vs. multi-core results (by number of threads)  
+mutate(
+  type = ifelse(n_distinct(thread_id) == 1, "single", "multi"),
+  .by  = .source,
+  .after = .source
+) %>%
+# P-core counters
+mutate(
+  # P-core frequency and power (account for zero denominator)
+  p_freq = ifelse(p_time > 0.01, p_cycles / p_time / 1e9, 0),
+  p_power = ifelse(p_time > 0.01, p_energy / p_time, 0),
+  # relative thread time spend on P-core 
+  p_usage = p_time/(p_time + e_time),
+  .before = p_cycles
+) %>%
+# E-core counters
+mutate(
+  # E-core frequency and power  (account for zero denominator)
+  e_freq = ifelse(e_time > 0.01, e_cycles / e_time / 1e9, 0),
+  e_power = ifelse(e_time > 0.01, e_energy / e_time, 0),
+  # relative thread time spend on E-core 
+  e_usage = e_time/(p_time + e_time),
+  .before = e_cycles
+) %>%
+# additional aggregated stats per thread
+mutate(
+  # total power
+  power = (p_energy + e_energy)/(p_time + e_time),
+  # throughtput (items/sec — both P- and E-cores) 
+  items_tp = items / (p_time + e_time),
+  # which cores did the thread run at
+  cores = {
+    P <- p_usage > 0.05
+    E <- e_usage > 0.05
+    case_when(P & E ~ "P,E", P ~ "P", E ~ "E")
+  },
+  .after = powermode
+) %>%
+# device detection
+mutate(
+  device = case_when(
+    # A13
+    device == "iPhone12,1"     ~ "A13",
+    device == "iPhone12,8"     ~ "A13",
+    
+    # A14
+    device == "iPhone13,3"     ~ "A14",
+    
+    # A15
+    device == "iPad14,1"       ~ "A15", # iPad Mini 6
+    device == "iPhone14,2"     ~ "A15",
+    
+    # A16
+    device == "iPhone15,2"     ~ "A16",
+    device == "iPhone15,3"     ~ "A16",
+    
+    # A17 Pro
+    device == "iPhone16,1"     ~ "A17 Pro",
+    
+    # M1 family
+    device == "MacBookPro18,2" ~ "M1", # Max
+    device == "MacBookPro18,3" ~ "M1", # Pro
+    device == "Mac13,2"        ~ "M1", # Ultra
+    
+    # M2 family
+    device == "Mac14,5"       ~ "M2", # Max
+    device == "Mac14,13"      ~ "M2", # Max
+    device == "Mac14,6"      ~ "M2", # Max
+    device == "Mac14,14"      ~ "M2", # Ultra
+    TRUE                      ~ "unknown"
+  )
+) 
+
+# guard agains unknown device
+stopifnot(!any(data$device == "unknown"))
+```
+
+The test data is shown in the table below. We have the following columns
+
+- **.source** the test run ID
+- **type** singe- or multi-core run
+- **sample** test iteration
+- **thread_id** thread (unique across samples)
+- **device** the device type
+- **powermode** high vs. low power
+- **power** total power usage of the thread per sample
+- **items_tp** work throughput per thread per the sample (items/sec)
+- **cores** types of cores the thread was running on
+- **p_freq** average frequency of the P-core while running the thread (GHz)
+- **p_power** average power draw of the P-core while running the thread (watt)
+- **p_usage** relative amount of time the thread spend running on a P-core
+- **p_cycles** number of cycles spent on a P-core
+- **p_time** amount of time spend on a P-core
+- **p_energy** energy used by P-core running the thread (J)
+- **e_...** same as above, but for E-cores
+- **items** number of work items processed by the thread for this sample
+
+```{r}
+data
+```
+
+
+## Power and frequency by device
+
+Power draw distribution across devices in high power mode
+
+```{r}
+ggplot(
+  data %>% 
+    filter(powermode == "high") %>% 
+    # remove multi-core for Macs, since it makes the gaph hard to read
+    filter(startsWith(device, "A") | type == "single") %>%
+    # sum the total power per sample (to get proper multi-core power usage)
+    summarize(power = sum(power), .by = c(.source, sample, type, device))
+) +
+geom_violin(aes(x = device, y = power, fill = type), alpha=0.5, scale = "width") + 
+ggtitle("Power consumption distribution by device (high power mode)") +
+xlab("Average power draw, watts")
+```
+
+Power draw distribution across devices in low power mode
+
+```{r}
+ggplot(
+  data %>% 
+    filter(powermode == "low") %>% 
+    # remove multi-core for Macs, since it makes the gaph hard to read
+    filter(startsWith(device, "A") | type == "single") %>%
+    # sum the total power per sample (to get proper multi-core power usage)
+    summarize(power = sum(power), .by = c(.source, sample, type, device))
+) +
+geom_violin(aes(x = device, y = power, fill = type), alpha=0.5, scale = "width") + 
+ggtitle("Power consumption distribution by device (low power mode)") +
+xlab("Average power draw, watts")
+```
+
+P-thread power/frequency relationship by device (power curve). We only consider thread samples where at least 10% of time was spend on a P-core to avoid obviously unreliable numbers. The data for A-series shows considerable amount of variation since we combine together single- and multi-core mode, as well as high- and low-power mode (and the phones do throttle their frequency over time, giving us a larger frequency range within these scenarios). The M-series appear more grouped because they are less prone to frequency adjustments over time due to their higher thermal dissipation capability. 
+
+```{r}
+ggplot(filter(data, p_power > 0.1)) + 
+  geom_point(aes(x = p_freq, y = p_power, color = device), size = 0.75, alpha = 0.5) +
+  scale_x_continuous(n.breaks = 10) +
+  scale_y_continuous(n.breaks = 10) +
+  ggtitle("P-core power curve by device") +
+  ylab("Thread power draw, watts") + 
+  xlab("CPU frequency, GHz")
+```
+
+Same, but for E-cores
+
+
+```{r}
+ggplot(filter(data, e_power > 0.1)) + 
+  geom_point(aes(x = e_freq, y = e_power, color = device), size = 0.75, alpha = 0.5) +
+  scale_x_continuous(n.breaks = 10) +
+  scale_y_continuous(n.breaks = 10) +
+  ggtitle("E-core power curve by device") +
+  ylab("Thread power draw, watts") + 
+  xlab("CPU frequency, GHz")
+```
+
+## Work throughput and energy efficiency
+
+Please take all of this with a grain of salt since the test is very simplistic and won't account for IPC differences between the micro-architectures. This is just about rough behavior. Work efficiency shoudl be measured on concrete workloads. 
+
+
+Work throughput (items/sec) for each device (high power, single-core results). Note that there is no good way to know how much work was done
+on P-cores and E-cores, so we just put this together. The different proportions of core involvement across threads produces the "cloud" effect. 
+
+```{r}
+ggplot(filter(data, powermode == "high", type == "single")) + 
+  geom_point(
+    aes(x = items/(p_time + e_time), y = p_power + e_power, color = device), 
+    size = 0.75, 
+    alpha = 0.75
+  ) + 
+  scale_color_discrete_qualitative("Set2") + 
+  scale_x_continuous(n.breaks = 10) +
+  scale_y_continuous(n.breaks = 10) +
+  ggtitle("Work throughtput by power usage (high power, single-core)") +
+  ylab("Thread power (P+E combined), watts") + 
+  xlab("Work throughtput, items/s") 
+```
+
+Energy (in J) used to perform the work
+
+```{r}
+ggplot(filter(data, powermode == "high", type == "single")) + 
+  geom_point(
+    aes(x = items, y = p_energy + e_energy, color = device), 
+    size = 0.75, 
+    alpha = 0.75
+  ) + 
+  scale_color_discrete_qualitative("Set2") + 
+  scale_x_continuous(n.breaks = 10) +
+  scale_y_continuous(n.breaks = 10) +
+  ggtitle("Energy usage and work per thread (high power, single-core)") +
+  xlab("Total work performed by thread (items) ") + 
+  ylab("Energy used (J)") 
+```
+
+## Power curve forecasting
+
+Attempt to estimate how the A17 power curve will continue beyond the observed range. We use the 
+constrained regression algorithms from package `colf` to force the coefficients to be non-negative (as 
+increasing frequency cannot lower power consumption). Please take this with a big grain of  salt, as this is likely overfitting the data. 
+
+
+```{r}
+# P-core data for A17 Pro
+a17_data <- data %>%
+  filter(device == "A17 Pro", p_usage > 0.2) %>% 
+  mutate(p_freq2 = p_freq^2, p_freq3 = p_freq^3, p_freq4 = p_freq^4, p_freq5 = p_freq^5, p_freq6 = p_freq^6)
+
+# fit the polynomial using constrained linear regression
+m1 <- colf::colf_nlxb(p_power ~ 1 + p_freq, a17_data, lower = c(-Inf, 0))
+m2 <- colf::colf_nlxb(p_power ~ 1 + p_freq + p_freq2, a17_data, lower = c(-Inf, 0, 0))
+m3 <- colf::colf_nlxb(p_power ~ 1 + p_freq + p_freq2 + p_freq3, a17_data, lower = c(-Inf, 0, 0, 0))
+m4 <- colf::colf_nlxb(p_power ~ 1 + p_freq + p_freq2 + p_freq3 + p_freq4, a17_data, lower = c(-Inf, 0, 0, 0, 0))
+m5 <- colf::colf_nlxb(p_power ~ 1 + p_freq + p_freq2 + p_freq3 + p_freq4 + p_freq5, a17_data, lower = c(-Inf, 0, 0, 0, 0, 0))
+m6 <- colf::colf_nlxb(p_power ~ 1 + p_freq + p_freq2 + p_freq3 + p_freq4 + p_freq5 + p_freq6, a17_data, lower = c(-Inf, 0, 0, 0, 0, 0, 0))
+
+
+# there is not much difference beyond fourth-degree polynomial
+a17_curve <- m4
+
+
+
+# setup predicted data
+a17_prediction <- tibble(
+  p_freq = seq(1, 5, by = 0.05), 
+  p_freq2 = p_freq^2, 
+  p_freq3 = p_freq^3, 
+  p_freq4 = p_freq^4,
+  p_freq5 = p_freq^5,
+  p_freq6 = p_freq^6
+)
+a17_prediction$p_power <- predict(m4, a17_prediction)
+
+ggplot(a17_prediction) + 
+  geom_path(aes(x = p_freq, y = p_power), color = "cyan", linetype = "dashed") +
+  # add the actual data
+  geom_point(aes(x = p_freq, y = p_power), size = 0.75, alpha = 0.75, data = a17_data) +
+  ggtitle("Predicted frequency curve for A17 Pro") +
+  ylab("Thread power draw, watts") + 
+  xlab("CPU frequency, GHz")
+```
+
+Compare this to A15/M2
+
+```{r}
+# P-core data for A15 
+a15_data <- data %>%
+  filter(device == "A15", p_usage > 0.2) %>% 
+  mutate(p_freq2 = p_freq^2, p_freq3 = p_freq^3, p_freq4 = p_freq^4,p_freq5 = p_freq^5, p_freq6 = p_freq^6)
+
+
+
+# fit the polynomial using constrained linear regression
+m1 <- colf::colf_nlxb(p_power ~ 1 + p_freq, a15_data, lower = c(-Inf, 0))
+m2 <- colf::colf_nlxb(p_power ~ 1 + p_freq + p_freq2, a15_data, lower = c(-Inf, 0, 0))
+m3 <- colf::colf_nlxb(p_power ~ 1 + p_freq + p_freq2 + p_freq3, a15_data, lower = c(-Inf, 0, 0, 0))
+m4 <- colf::colf_nlxb(p_power ~ 1 + p_freq + p_freq2 + p_freq3 + p_freq4, a15_data, lower = c(-Inf, 0, 0, 0, 0))
+m5 <- colf::colf_nlxb(p_power ~ 1 + p_freq + p_freq2 + p_freq3 + p_freq4 + p_freq5, a15_data, lower = c(-Inf, 0, 0, 0, 0, 0))
+m6 <- colf::colf_nlxb(p_power ~ 1 + p_freq + p_freq2 + p_freq3 + p_freq4 + p_freq5 + p_freq6, a15_data, lower = c(-Inf, 0, 0, 0, 0, 0, 0))
+
+
+# the sixth degree polynomial offers the best fit and predicts M2 data well!
+a15_curve <- m6
+
+
+# setup predicted data
+a15_prediction <- tibble(
+  p_freq = seq(1, 5, by = 0.05), 
+  p_freq2 = p_freq^2, 
+  p_freq3 = p_freq^3, 
+  p_freq4 = p_freq^4,
+  p_freq5 = p_freq^5,
+  p_freq6 = p_freq^6
+)
+a15_prediction$p_power <- predict(a15_curve, a15_prediction)
+
+
+ggplot(a15_prediction) + 
+  geom_path(aes(x = p_freq, y = p_power), color = "cyan", linetype = "dashed") +
+  # add the actual data
+  geom_point(aes(x = p_freq, y = p_power), size = 0.75, alpha = 0.75, data = {
+    filter(data, device %in%  c("A15", "M2"), p_usage > 0.2)
+  }) +
+  # add the A17 curve for comparison
+  geom_path(aes(x = p_freq, y = p_power), color = "grey", linetype = "dashed", data = a17_prediction) +
+  geom_label(aes(x = p_freq, y = p_power), label = "a17", data = filter(a17_prediction, p_freq == 4.5)) + 
+  ggtitle("Predicted frequency curve for A17 Pro") +
+  ylab("Thread power draw, watts") + 
+  xlab("CPU frequency, GHz")
 ```
 
